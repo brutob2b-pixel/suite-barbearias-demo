@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stars — visão do cliente</title>
+  <script src="config.js"></script>
+  <script src="nav.js"></script>
+  <script src="suite-data.js"></script>
+  <script src="demo-data.js"></script>
+  <style>
+    .page { flex:1;overflow-y:auto;padding:20px 28px 28px; }
+    .kpis-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px; }
+    .kpi-card { background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px; }
+    .kpi-label { font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);margin-bottom:8px; }
+    .kpi-value { font-family:'Syne',sans-serif;font-weight:800;font-size:24px;letter-spacing:-.04em;color:var(--text); }
+    .kpi-sub { font-size:12px;color:var(--muted);margin-top:4px; }
+    .box { background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:24px;overflow-x:auto; }
+    .box table { width:100%;font-size:12px;border-collapse:collapse; }
+    .box th { color:var(--dim);text-align:left;font-weight:500;padding-bottom:8px; }
+    .box td { padding:8px 0;border-top:1px solid var(--border);color:var(--muted); }
+    .box td:first-child { color:var(--text); }
+    .tag { font-size:11px;padding:2px 8px;border-radius:3px; }
+    .tag-red { background:var(--red-12);color:var(--red); }
+    .tag-amber { background:var(--amber-12);color:var(--amber); }
+    .tag-green { background:var(--green-12);color:var(--green); }
+    .aviso { font-size:12px;color:var(--dim);margin-bottom:20px; }
+    h2.sec { font-family:'Syne',sans-serif;font-weight:700;font-size:14px;letter-spacing:-.02em;margin-bottom:12px; }
+    @media (max-width:800px) { .kpis-grid { grid-template-columns:repeat(2,1fr); } }
+  </style>
+</head>
+<body>
+<div class="suite-layout">
+  <aside id="suite-sidebar" class="suite-sidebar"></aside>
+  <main class="suite-main">
+    <div class="module-header">
+      <h1 class="module-title">Stars <span class="dash">—</span> visão do cliente</h1>
+      <p class="module-subtitle"><span id="cliente-nome"></span> · o que a Stars enxerga para saber a hora de repor</p>
+    </div>
+    <div class="page">
+      <p class="aviso">Demonstração: esta é a visão da Stars. No produto real, a barbearia autoriza o que compartilha, e a Stars vê só venda e estoque da linha Stars, nunca o caixa nem a equipe.</p>
+      <div class="kpis-grid" id="kpis"></div>
+      <h2 class="sec">Estoque e hora de repor</h2>
+      <div class="box"><table>
+        <thead><tr><th>Produto</th><th>Em estoque</th><th>Vende por dia</th><th>Dura cerca de</th><th>Situação</th><th style="text-align:right;">Pedido sugerido</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table></div>
+      <h2 class="sec">Pedidos em andamento</h2>
+      <div class="box" id="pedidos"></div>
+    </div>
+  </main>
+</div>
+<div id="toast-container"></div>
+<script>
+const { U } = Suite;
+const esc = U.esc, fmt = U.fmtBRL;
+const JANELA = 14;   // dias de vendas usados para calcular o ritmo
+const PRAZO = 10;    // dias de entrega de exemplo: se o estoque dura menos que isso, repor agora
+
+async function init() {
+  document.getElementById('cliente-nome').textContent = CLIENT_CONFIG.empresa;
+  const [estoque, vendas, pedidos] = await Promise.all([store.load('estoque'), store.load('vendas'), store.load('pedidos_stars')]);
+  const desde = U.addDays(U.today(), -JANELA);
+  const abertos = pedidos.filter(p => p.status !== 'Entregue');
+  const emPedido = new Set(abertos.flatMap(p => Object.keys(p.repor || {})));
+  const linhas = estoque.filter(p => p.grupo === 'Linha Stars').map(p => {
+    const vend = vendas.filter(v => v.produto === p.id && v.data >= desde).reduce((s, v) => s + v.qtd, 0);
+    const porDia = vend / JANELA;
+    const dias = porDia ? Math.floor(p.qtd / porDia) : null; // null: sem vendas no período
+    const repor = p.qtd < p.minimo || (dias !== null && dias <= PRAZO);
+    const sugerido = repor ? Math.max(p.minimo * 2 - p.qtd, p.minimo) : 0;
+    return { ...p, vend, porDia, dias, repor, sugerido, aCaminho: emPedido.has(p.id) };
+  });
+  const agora = linhas.filter(l => l.repor && !l.aCaminho);
+  const kpis = [
+    { label:'Potes vendidos', value: linhas.reduce((s, l) => s + l.vend, 0), sub: `nos últimos ${JANELA} dias` },
+    { label:'Repor agora', value: agora.length, sub: agora.length ? agora.map(l => esc(l.nome)).join(', ') : 'nada urgente' },
+    { label:'Pedidos a caminho', value: abertos.length, sub: 'em produção, separação ou envio' },
+    { label:'Pedido sugerido', value: fmt(agora.reduce((s, l) => s + l.sugerido * l.custo, 0)), sub: 'valor dos itens para repor agora' },
+  ];
+  document.getElementById('kpis').innerHTML = kpis.map(k => `
+    <div class="kpi-card"><div class="kpi-label">${k.label}</div><div class="kpi-value">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`).join('');
+  document.getElementById('tbody').innerHTML = linhas.map(l => {
+    const sit = l.aCaminho ? ['pedido a caminho', 'tag-green'] : l.repor ? ['repor agora', 'tag-red'] : l.dias !== null && l.dias <= PRAZO * 2 ? ['repor em breve', 'tag-amber'] : ['em dia', 'tag-green'];
+    return `<tr>
+      <td>${esc(l.nome)}</td><td>${l.qtd} (mín. ${l.minimo})</td><td>${l.porDia.toFixed(1)} potes</td>
+      <td>${l.dias === null ? 'sem vendas' : l.dias + ' dias'}</td>
+      <td><span class="tag ${sit[1]}">${sit[0]}</span></td>
+      <td style="text-align:right;">${l.sugerido && !l.aCaminho ? `${l.sugerido} potes · ${fmt(l.sugerido * l.custo)}` : '—'}</td></tr>`;
+  }).join('');
+  document.getElementById('pedidos').innerHTML = abertos.map(p => `
+    <div style="display:flex;gap:12px;margin:6px 0;font-size:12px;"><span style="width:60px;color:var(--text);">#${esc(p.id)}</span>
+    <span style="flex:1;color:var(--text);">${esc(p.titulo)}</span><span style="color:var(--muted);">${esc(p.status)} · previsão ${U.fmtDate(p.previsao)}</span></div>`).join('')
+    || `<div style="font-size:12px;color:var(--dim);">Nenhum pedido em andamento.</div>`;
+}
+init();
+</script>
+</body>
+</html>
